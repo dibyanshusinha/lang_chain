@@ -1,4 +1,5 @@
 import sys
+import os
 
 from dotenv import dotenv_values
 from langchain_openai import ChatOpenAI
@@ -17,7 +18,6 @@ config = {
     **dotenv_values('.env')
 }
 
-
 QUERY = None
 chat_history = []
 
@@ -35,13 +35,28 @@ splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=20)
 all_splits = splitter.split_documents(files)
 
 
+def embed_index(split_list, embed_fn, index_store):
+    faiss_db = FAISS.from_documents(split_list, embed_fn)
+    if os.path.exists(index_store):
+        local_db = FAISS.load_local(index_store, embed_fn, allow_dangerous_deserialization=True)
+        local_db.merge_from(faiss_db)
+        local_db.save_local(index_store)
+    else:
+        faiss_db.save_local(folder_path=index_store)
+
+
 embedding_func = OpenAIEmbeddings(
     openai_api_key=config.get('OPENAI_API_KEY'),
     model="text-embedding-3-large"
 )
 
-vectorstore = FAISS.from_documents(all_splits, embedding_func)
+embed_index(all_splits, embedding_func, config.get('DATA_STORE'))
 
+vectorstore = FAISS.load_local(
+    config.get('DATA_STORE'),
+    embedding_func,
+    allow_dangerous_deserialization=True
+)
 retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 4})
 
 MODEL = ChatOpenAI(
@@ -50,23 +65,26 @@ MODEL = ChatOpenAI(
     temperature=0
 )
 
+
+REPHRASE_TEMPLATE_STR = """Given the above conversation, generate a search query to \
+look up in order to get information relevant to the conversation"""
 rephrase_prompt = ChatPromptTemplate.from_messages([
     MessagesPlaceholder(variable_name="chat_history"),
     ("user", "{input}"),
-    ("user", """Given the above conversation, generate a search query to look up \
-     in order to get information relevant to the conversation""")
+    ("user", REPHRASE_TEMPLATE_STR)
 ])
 
 retriever_chain = create_history_aware_retriever(MODEL, retriever, rephrase_prompt)
 
-PROMPT_TEMPLATE = """You are an assistant for question-answering tasks. \
+PROMPT_TEMPLATE_STR = """You are an assistant for question-answering tasks. \
 Use the following pieces of retrieved context to answer the question. \
 If you don't know the answer, just say that you don't know. \
+Use three sentences maximum and keep the answer concise.\
 
 {context}"""
 
 prompt = ChatPromptTemplate.from_messages([
-    ("system", PROMPT_TEMPLATE),
+    ("system", PROMPT_TEMPLATE_STR),
     MessagesPlaceholder(variable_name="chat_history"),
     ("user", "{input}")
 ])
